@@ -17,6 +17,7 @@ import (
 	redisstore "github.com/yourorg/cloudctrl/internal/store/redis"
 	ws "github.com/yourorg/cloudctrl/internal/websocket"
 	"go.uber.org/zap"
+	"github.com/yourorg/cloudctrl/internal/configmgr"
 )
 
 // App is the main application container.
@@ -29,6 +30,7 @@ type App struct {
 	redisStore *redisstore.Store
 	jwtService *auth.JWTService
 	hub        *ws.Hub
+	configMgr    *configmgr.Manager  // ← ADD THIS
 }
 
 // NewApp creates and wires up the entire application.
@@ -88,6 +90,13 @@ func NewApp(ctx context.Context, cfg *config.Config, logger *zap.Logger) (*App, 
 		IdleTimeout:  0, // No idle timeout for WebSocket
 	}
 
+	// Initialize Config Manager
+	cmCfg := configmgr.DefaultManagerConfig()
+	app.configMgr = configmgr.NewManager(pg, app.hub, cmCfg, logger.Named("configmgr"))
+
+	// Wire config manager into hub
+	app.hub.SetConfigManager(app.configMgr)
+
 	if cfg.TLS.Enabled {
 		tlsConfig := &tls.Config{
 			MinVersion: tls.VersionTLS12,
@@ -128,6 +137,7 @@ func (a *App) buildRouter() *gin.Engine {
 	siteHandler := handler.NewSiteHandler(a.pgStore, a.redisStore, a.logger)
 	auditHandler := handler.NewAuditHandler(a.pgStore, a.logger)
 	deviceHandler := handler.NewDeviceHandler(a.pgStore, a.hub, a.logger)
+	configHandler := handler.NewConfigHandler(a.pgStore, a.configMgr, a.logger)  // ← ADD
 
 	// ── Public endpoints (no auth) ───────────────────────────
 	router.GET("/health", healthHandler.Health)
@@ -197,6 +207,13 @@ func (a *App) buildRouter() *gin.Engine {
 				sites.PUT("/:id", middleware.RequireOperator(), siteHandler.Update)
 				sites.DELETE("/:id", middleware.RequireAdmin(), siteHandler.Delete)
 				sites.GET("/:id/stats", middleware.RequireViewer(), siteHandler.Stats)
+
+				// Site Config (NEW)
+				sites.GET("/:id/config", middleware.RequireViewer(), configHandler.GetSiteConfig)
+				sites.PUT("/:id/config", middleware.RequireOperator(), configHandler.UpdateSiteConfig)
+				sites.GET("/:id/config/history", middleware.RequireViewer(), configHandler.GetSiteConfigHistory)
+				sites.POST("/:id/config/rollback", middleware.RequireOperator(), configHandler.RollbackSiteConfig)
+				sites.POST("/:id/config/validate", middleware.RequireOperator(), configHandler.ValidateSiteConfig)
 			}
 
 			// Devices
@@ -211,6 +228,15 @@ func (a *App) buildRouter() *gin.Engine {
 				devices.POST("/:id/adopt", middleware.RequireOperator(), deviceHandler.Adopt)
 				devices.POST("/:id/move", middleware.RequireOperator(), deviceHandler.Move)
 				devices.GET("/:id/status", middleware.RequireViewer(), deviceHandler.LiveStatus)
+
+				// Device Config (NEW)
+				devices.GET("/:id/config", middleware.RequireViewer(), configHandler.GetDeviceConfig)
+				devices.GET("/:id/config/overrides", middleware.RequireViewer(), configHandler.GetDeviceOverrides)
+				devices.PUT("/:id/config/overrides", middleware.RequireOperator(), configHandler.UpdateDeviceOverrides)
+				devices.DELETE("/:id/config/overrides", middleware.RequireOperator(), configHandler.DeleteDeviceOverrides)
+				devices.GET("/:id/config/history", middleware.RequireViewer(), configHandler.GetDeviceConfigHistory)
+				devices.POST("/:id/config/rollback", middleware.RequireOperator(), configHandler.RollbackDeviceConfig)
+				devices.POST("/:id/config/push", middleware.RequireOperator(), configHandler.ForcePushDeviceConfig)
 			}
 
 			// Audit
@@ -239,6 +265,9 @@ func (a *App) buildWSRouter() *gin.Engine {
 func (a *App) Start() error {
 	// Start the hub
 	a.hub.Run()
+
+	// Start the config manager     ← ADD
+	a.configMgr.Start()
 
 	go func() {
 		a.logger.Info("starting HTTP API server", zap.String("addr", a.cfg.Server.HTTPAddr))
@@ -284,6 +313,9 @@ func (a *App) Stop(ctx context.Context) error {
 	if err := a.wsServer.Shutdown(ctx); err != nil {
 		a.logger.Error("WebSocket server shutdown error", zap.Error(err))
 	}
+
+	// Stop config manager          ← ADD
+	a.configMgr.Stop()
 
 	// Drain WebSocket connections and stop hub
 	a.hub.Stop(ctx)

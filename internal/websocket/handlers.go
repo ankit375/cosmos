@@ -58,7 +58,7 @@ func (h *Hub) handleHeartbeat(conn *DeviceConnection, msg *protocol.Message) {
 
 	wsHeartbeatsProcessed.Inc()
 
-	// Detect state transitions (NEW)
+	// Detect state transitions
 	if previousStatus != model.DeviceStatusOnline && previousStatus != "" {
 		wsDeviceStateTransitions.WithLabelValues(string(previousStatus), string(model.DeviceStatusOnline)).Inc()
 		wsDevicesByStatus.WithLabelValues(string(model.DeviceStatusOnline)).Inc()
@@ -78,6 +78,15 @@ func (h *Hub) handleHeartbeat(conn *DeviceConnection, msg *protocol.Message) {
 					payload.IPAddress, payload.FirmwareVersion)
 			}
 		}
+
+		// >>> NEW: Push pending config on reconnect <<<
+		h.mu.RLock()
+		cm := h.configManager
+		h.mu.RUnlock()
+
+		if cm != nil {
+			go cm.PushPendingConfigOnReconnect(conn.TenantID, conn.DeviceID)
+		}
 	}
 
 	// Get current state for the ack
@@ -88,7 +97,7 @@ func (h *Hub) handleHeartbeat(conn *DeviceConnection, msg *protocol.Message) {
 		desiredVersion = state.DesiredConfigVersion
 	}
 
-	// Count pending commands for this device (NEW)
+	// Count pending commands for this device
 	pendingCommands := h.getPendingCommandCount(conn.DeviceID)
 
 	// Send HeartbeatAck

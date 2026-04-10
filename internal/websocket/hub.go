@@ -12,6 +12,7 @@ import (
 	"github.com/yourorg/cloudctrl/internal/protocol"
 	pgstore "github.com/yourorg/cloudctrl/internal/store/postgres"
 	"go.uber.org/zap"
+	"github.com/yourorg/cloudctrl/internal/configmgr"
 )
 
 // Hub manages all device WebSocket connections.
@@ -45,6 +46,8 @@ type Hub struct {
 
 	// Message handlers
 	handlers map[uint16]MessageHandler
+
+	configManager *configmgr.Manager  
 
 	// Lifecycle
 	ctx    context.Context

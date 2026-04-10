@@ -1,14 +1,23 @@
+//go:build integration
+
 package integration
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/yourorg/cloudctrl/internal/api/handler"
+	"github.com/yourorg/cloudctrl/internal/model"
+	pgstore "github.com/yourorg/cloudctrl/internal/store/postgres"
+	"go.uber.org/zap"
 )
 
 // performRequest executes an HTTP request against the test router.
@@ -95,4 +104,43 @@ func dataAs(t *testing.T, resp apiResponse, target interface{}) {
 	if err := json.Unmarshal(resp.Data, target); err != nil {
 		t.Fatalf("failed to unmarshal response data: %v\nraw: %s", err, string(resp.Data))
 	}
+}
+
+// createTestDeviceInDB creates an adopted device directly in the database.
+func createTestDeviceInDB(t *testing.T, store *pgstore.Store, tenantID, siteID uuid.UUID) *model.Device {
+	t.Helper()
+	ctx := context.Background()
+
+	deviceID := uuid.New()
+	mac := fmt.Sprintf("AA:BB:CC:%02X:%02X:%02X",
+		time.Now().UnixNano()%256,
+		(time.Now().UnixNano()/256)%256,
+		(time.Now().UnixNano()/65536)%256,
+	)
+
+	_, err := store.Pool.Exec(ctx,
+		`INSERT INTO devices (id, tenant_id, site_id, mac, serial, name, model, status,
+			firmware_version, capabilities, system_info, adopted_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'online', '1.0.0',
+			'{"bands":["2g","5g"],"max_ssids":16,"wpa3":true,"vlan":true}', '{}', NOW())`,
+		deviceID, tenantID, siteID, mac,
+		"SN-"+uuid.New().String()[:8],
+		"test-ap-"+uuid.New().String()[:8],
+		"AP-TEST-01",
+	)
+	if err != nil {
+		t.Fatalf("create test device: %v", err)
+	}
+
+	device, err := store.Devices.GetByID(ctx, tenantID, deviceID)
+	if err != nil || device == nil {
+		t.Fatalf("retrieve test device: %v", err)
+	}
+	return device
+}
+
+// newTestLogger creates a logger for tests.
+func newTestLogger() *zap.Logger {
+	logger, _ := zap.NewDevelopment()
+	return logger
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/yourorg/cloudctrl/pkg/logger"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
+	"github.com/yourorg/cloudctrl/internal/configmgr"
 )
 
 var (
@@ -32,6 +33,7 @@ var (
 	testRouter *gin.Engine
 	testCfg    *config.Config
 	testHub    *ws.Hub // NEW
+	testConfigMgr *configmgr.Manager  // ← ADD
 )
 
 // TestMain sets up and tears down the integration test environment.
@@ -71,8 +73,17 @@ func TestMain(m *testing.M) {
 	// WebSocket Hub (NEW)
 	testHub = ws.NewHub(cfg.WebSocket, pg, log.Named("websocket"))
 
+	// Config Manager (NEW)
+	cmCfg := configmgr.ManagerConfig{
+		SafeApplyTimeout:  10 * time.Second,  // Shorter for tests
+		StabilityDelay:    1 * time.Second,   // Shorter for tests
+		ReconcileInterval: 60 * time.Second,  // Don't auto-reconcile in tests
+	}
+	testConfigMgr = configmgr.NewManager(pg, testHub, cmCfg, log.Named("configmgr"))
+	testHub.SetConfigManager(testConfigMgr)
+
 	// Build test router (now includes device routes)
-	testRouter = buildTestRouter(pg, rds, testJWT, testHub, log)
+	testRouter = buildTestRouter(pg, rds, testJWT, testHub, testConfigMgr, log)
 
 	// Run tests
 	code := m.Run()
@@ -149,6 +160,7 @@ func buildTestRouter(
 	rds *redisstore.Store,
 	jwtSvc *auth.JWTService,
 	hub *ws.Hub,
+	cm *configmgr.Manager,  // ← ADD PARAMETER
 	log *zap.Logger,
 ) *gin.Engine {
 	gin.SetMode(gin.TestMode)
@@ -164,6 +176,7 @@ func buildTestRouter(
 	siteHandler := handler.NewSiteHandler(pg, rds, log)
 	auditHandler := handler.NewAuditHandler(pg, log)
 	deviceHandler := handler.NewDeviceHandler(pg, hub, log) // NEW
+	configHandler := handler.NewConfigHandler(pg, cm, log)  // ← ADD
 
 	// Public
 	router.GET("/health", healthHandler.Health)
@@ -221,6 +234,13 @@ func buildTestRouter(
 				sites.PUT("/:id", middleware.RequireOperator(), siteHandler.Update)
 				sites.DELETE("/:id", middleware.RequireAdmin(), siteHandler.Delete)
 				sites.GET("/:id/stats", middleware.RequireViewer(), siteHandler.Stats)
+
+				// Site Config (NEW)
+				sites.GET("/:id/config", middleware.RequireViewer(), configHandler.GetSiteConfig)
+				sites.PUT("/:id/config", middleware.RequireOperator(), configHandler.UpdateSiteConfig)
+				sites.GET("/:id/config/history", middleware.RequireViewer(), configHandler.GetSiteConfigHistory)
+				sites.POST("/:id/config/rollback", middleware.RequireOperator(), configHandler.RollbackSiteConfig)
+				sites.POST("/:id/config/validate", middleware.RequireOperator(), configHandler.ValidateSiteConfig)
 			}
 
 			// Devices (NEW)
@@ -235,6 +255,13 @@ func buildTestRouter(
 				devices.POST("/:id/adopt", middleware.RequireOperator(), deviceHandler.Adopt)
 				devices.POST("/:id/move", middleware.RequireOperator(), deviceHandler.Move)
 				devices.GET("/:id/status", middleware.RequireViewer(), deviceHandler.LiveStatus)
+				devices.GET("/:id/config", middleware.RequireViewer(), configHandler.GetDeviceConfig)
+				devices.GET("/:id/config/overrides", middleware.RequireViewer(), configHandler.GetDeviceOverrides)
+				devices.PUT("/:id/config/overrides", middleware.RequireOperator(), configHandler.UpdateDeviceOverrides)
+				devices.DELETE("/:id/config/overrides", middleware.RequireOperator(), configHandler.DeleteDeviceOverrides)
+				devices.GET("/:id/config/history", middleware.RequireViewer(), configHandler.GetDeviceConfigHistory)
+				devices.POST("/:id/config/rollback", middleware.RequireOperator(), configHandler.RollbackDeviceConfig)
+				devices.POST("/:id/config/push", middleware.RequireOperator(), configHandler.ForcePushDeviceConfig)
 			}
 
 			// Audit
@@ -440,6 +467,15 @@ func cleanupTenant(t *testing.T, tenantID uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()
 
+		// Delete device configs first (FK to devices)
+	_, _ = testPG.Pool.Exec(ctx, "DELETE FROM device_configs WHERE tenant_id = $1", tenantID)
+
+	// Delete device overrides (FK to devices)
+	_, _ = testPG.Pool.Exec(ctx, "DELETE FROM device_overrides WHERE tenant_id = $1", tenantID)
+
+	// Delete config templates (FK to sites)
+	_, _ = testPG.Pool.Exec(ctx, "DELETE FROM config_templates WHERE tenant_id = $1", tenantID)
+
 	// Delete devices first (FK constraint)
 	// ✅ Fixed
 	_, _ = testPG.Pool.Exec(ctx, "DELETE FROM devices WHERE tenant_id = $1", tenantID)
@@ -461,4 +497,33 @@ func cleanupTenant(t *testing.T, tenantID uuid.UUID) {
 
 	// Flush test Redis DB
 	_ = testRedis.Client.FlushDB(ctx).Err()
+}
+
+// seedAdoptedDevice creates a device that's already adopted to a site.
+func seedAdoptedDevice(t *testing.T, tenantID, siteID uuid.UUID, name string) *model.Device {
+	t.Helper()
+	ctx := context.Background()
+
+	deviceID := uuid.New()
+	mac := fmt.Sprintf("DD:EE:FF:%02X:%02X:%02X", deviceID[0], deviceID[1], deviceID[2])
+
+	_, err := testPG.Pool.Exec(ctx, `
+		INSERT INTO devices (id, tenant_id, site_id, mac, serial, name, model, status,
+			firmware_version, capabilities, system_info, adopted_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'online', '1.0.0',
+			'{"bands":["2g","5g"],"max_ssids":16,"wpa3":true,"vlan":true}', '{}', NOW())`,
+		deviceID, tenantID, siteID, mac,
+		"SN-"+deviceID.String()[:8],
+		name,
+		"AP-2400-AC",
+	)
+	if err != nil {
+		t.Fatalf("failed to seed adopted device: %v", err)
+	}
+
+	device, err := testPG.Devices.GetByID(ctx, tenantID, deviceID)
+	if err != nil || device == nil {
+		t.Fatalf("failed to retrieve seeded adopted device: %v", err)
+	}
+	return device
 }

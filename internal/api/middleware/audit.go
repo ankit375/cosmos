@@ -136,6 +136,28 @@ func resolveAction(method, path string) string {
 		return "get_stats"
 	}
 
+	// Config-specific actions (NEW)
+	if strings.Contains(path, "/config/rollback") {
+		return "config_rollback"
+	}
+	if strings.Contains(path, "/config/validate") {
+		return "config_validate"
+	}
+	if strings.Contains(path, "/config/push") {
+		return "config_force_push"
+	}
+	if strings.Contains(path, "/config/overrides") {
+		switch method {
+		case http.MethodPut:
+			return "config_override_update"
+		case http.MethodDelete:
+			return "config_override_delete"
+		}
+	}
+	if strings.Contains(path, "/config") && method == http.MethodPut {
+		return "config_update"
+	}
+
 	switch method {
 	case http.MethodPost:
 		return "create"
@@ -159,6 +181,10 @@ func resolveResource(path string) (string, uuid.UUID) {
 
 	resourceType := singularize(parts[0])
 
+	if len(parts) >= 3 && parts[2] == "config" {
+		resourceType = singularize(parts[0]) + "_config"
+	}
+
 	var resourceID uuid.UUID
 	if len(parts) >= 2 {
 		if id, err := uuid.Parse(parts[1]); err == nil {
@@ -177,6 +203,8 @@ func singularize(s string) string {
 		"users":   "user",
 		"devices": "device",
 		"audit":   "audit",
+		"config":   "config",    
+		"firmware": "firmware",
 	}
 	if singular, ok := mapping[s]; ok {
 		return singular
