@@ -111,9 +111,11 @@ type FirmwareConfig struct {
 }
 
 type MetricsConfig struct {
-	RetentionDays int           `mapstructure:"retention_days"`
-	FlushInterval time.Duration `mapstructure:"flush_interval"`
-	BatchSize     int           `mapstructure:"batch_size"`
+	RetentionDays         int           `mapstructure:"retention_days"`
+	FlushInterval         time.Duration `mapstructure:"flush_interval"`
+	BatchSize             int           `mapstructure:"batch_size"`
+	SessionUpdateInterval time.Duration `mapstructure:"session_update_interval"`
+	ClientSnapshotTTL     time.Duration `mapstructure:"client_snapshot_ttl"`
 }
 
 type MonitoringConfig struct {
@@ -230,6 +232,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("websocket.state_persist_interval", "30s")
 	v.SetDefault("websocket.offline_check_interval", "30s")
 	v.SetDefault("websocket.heartbeat_timeout", "90s")
+
+	// Metrics (update existing defaults)
+	v.SetDefault("metrics.retention_days", 7)
+	v.SetDefault("metrics.flush_interval", "10s")
+	v.SetDefault("metrics.batch_size", 2000)
+	v.SetDefault("metrics.session_update_interval", "120s")
+	v.SetDefault("metrics.client_snapshot_ttl", "5m")
 }
 
 func (c *Config) Validate() error {

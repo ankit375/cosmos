@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/yourorg/cloudctrl/internal/api/handler"
 	"github.com/yourorg/cloudctrl/internal/api/middleware"
@@ -19,6 +20,7 @@ import (
 	redisstore "github.com/yourorg/cloudctrl/internal/store/redis"
 	ws "github.com/yourorg/cloudctrl/internal/websocket"
 	"go.uber.org/zap"
+	"github.com/yourorg/cloudctrl/internal/telemetry"
 )
 
 // App is the main application container.
@@ -33,6 +35,7 @@ type App struct {
 	hub        *ws.Hub
 	configMgr  *configmgr.Manager
 	commandMgr *command.Manager
+	telemetryEngine *telemetry.Engine
 }
 
 // NewApp creates and wires up the entire application.
@@ -106,6 +109,33 @@ func NewApp(ctx context.Context, cfg *config.Config, logger *zap.Logger) (*App, 
 	// Wire command manager into hub
 	app.hub.SetCommandManager(app.commandMgr)
 
+	// Initialize Telemetry Engine (Phase 7)
+	teCfg := telemetry.EngineConfig{
+		FlushInterval:         cfg.Metrics.FlushInterval,
+		BufferCapacity:        cfg.Metrics.BatchSize,
+		SessionUpdateInterval: 120 * time.Second,
+		ClientSnapshotTTL:     5 * time.Minute,
+	}
+	if teCfg.FlushInterval == 0 {
+		teCfg = telemetry.DefaultEngineConfig()
+	}
+	app.telemetryEngine = telemetry.NewEngine(teCfg, pg, rds, logger.Named("telemetry"))
+
+	// Wire telemetry engine into hub
+	app.hub.SetTelemetryEngine(app.telemetryEngine)
+
+	// Wire state updater so telemetry can update in-memory device state
+	app.telemetryEngine.SetStateUpdateFn(func(deviceID uuid.UUID, cpu float64, memUsed uint64, memTotal uint64, clientCount int, lastMetrics time.Time) {
+		app.hub.StateStore().Update(deviceID, func(state *ws.DeviceState) {
+			state.CPUUsage = cpu
+			state.MemoryUsed = memUsed
+			state.MemoryTotal = memTotal
+			state.ClientCount = clientCount
+			state.LastMetrics = lastMetrics
+			state.Dirty = true
+		})
+	})
+
 	if cfg.TLS.Enabled {
 		tlsConfig := &tls.Config{
 			MinVersion: tls.VersionTLS12,
@@ -148,6 +178,7 @@ func (a *App) buildRouter() *gin.Engine {
 	deviceHandler := handler.NewDeviceHandler(a.pgStore, a.hub, a.logger)
 	configHandler := handler.NewConfigHandler(a.pgStore, a.configMgr, a.logger)
 	commandHandler := handler.NewCommandHandler(a.pgStore, a.commandMgr, a.logger)
+	metricsHandler := handler.NewMetricsHandler(a.pgStore, a.telemetryEngine, a.logger)
 
 	// ── Public endpoints (no auth) ───────────────────────────
 	router.GET("/health", healthHandler.Health)
@@ -224,6 +255,10 @@ func (a *App) buildRouter() *gin.Engine {
 				sites.GET("/:id/config/history", middleware.RequireViewer(), configHandler.GetSiteConfigHistory)
 				sites.POST("/:id/config/rollback", middleware.RequireOperator(), configHandler.RollbackSiteConfig)
 				sites.POST("/:id/config/validate", middleware.RequireOperator(), configHandler.ValidateSiteConfig)
+				
+				// Site Metrics (Phase 7)
+				sites.GET("/:id/metrics", middleware.RequireViewer(), metricsHandler.GetSiteMetrics)
+				sites.GET("/:id/clients", middleware.RequireViewer(), metricsHandler.GetSiteClients)
 			}
 
 			// Devices
@@ -254,6 +289,12 @@ func (a *App) buildRouter() *gin.Engine {
 				devices.POST("/:id/kick-client", middleware.RequireOperator(), commandHandler.KickClient)
 				devices.POST("/:id/scan", middleware.RequireOperator(), commandHandler.Scan)
 				devices.GET("/:id/commands", middleware.RequireViewer(), commandHandler.ListCommands)
+
+				// Device Metrics (Phase 7)
+				devices.GET("/:id/metrics", middleware.RequireViewer(), metricsHandler.GetDeviceMetrics)
+				devices.GET("/:id/metrics/radio", middleware.RequireViewer(), metricsHandler.GetDeviceRadioMetrics)
+				devices.GET("/:id/clients", middleware.RequireViewer(), metricsHandler.GetDeviceClients)
+				devices.GET("/:id/clients/history", middleware.RequireViewer(), metricsHandler.GetDeviceClientHistory)
 			}
 
 			// Audit
@@ -293,6 +334,9 @@ func (a *App) Start() error {
 
 	// Start the command manager
 	a.commandMgr.Start()
+
+	// Start the telemetry engine
+	a.telemetryEngine.Start()
 
 	go func() {
 		a.logger.Info("starting HTTP API server", zap.String("addr", a.cfg.Server.HTTPAddr))
@@ -344,6 +388,9 @@ func (a *App) Stop(ctx context.Context) error {
 
 	// Stop config manager
 	a.configMgr.Stop()
+
+	// Stop telemetry engine (flushes remaining data)
+	a.telemetryEngine.Stop()
 
 	// Drain WebSocket connections and stop hub
 	a.hub.Stop(ctx)

@@ -58,6 +58,13 @@ type Hub struct {
 		GetPendingCount(deviceID uuid.UUID) int
 	}
 
+	// Telemetry engine (Phase 7)
+	telemetryEngine interface {
+		Ingest(deviceID, tenantID uuid.UUID, siteID *uuid.UUID, payload *protocol.MetricsReportPayload)
+		HandleClientEvent(deviceID, tenantID uuid.UUID, siteID *uuid.UUID, payload *protocol.ClientEventPayload)
+		OnDeviceDisconnect(deviceID uuid.UUID)
+	}
+
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -119,6 +126,17 @@ func (h *Hub) SetCommandManager(cm interface {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.commandManager = cm
+}
+
+// SetTelemetryEngine wires the telemetry engine into the hub.
+func (h *Hub) SetTelemetryEngine(te interface {
+	Ingest(deviceID, tenantID uuid.UUID, siteID *uuid.UUID, payload *protocol.MetricsReportPayload)
+	HandleClientEvent(deviceID, tenantID uuid.UUID, siteID *uuid.UUID, payload *protocol.ClientEventPayload)
+	OnDeviceDisconnect(deviceID uuid.UUID)
+}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.telemetryEngine = te
 }
 
 // Run starts the hub's main loop and background workers.
@@ -253,6 +271,11 @@ func (h *Hub) removeConnectionLocked(conn *DeviceConnection) {
 		state.Status = model.DeviceStatusOffline
 		state.Dirty = true
 	})
+
+	// Clean up telemetry state (Phase 7)
+	if conn.authenticated && h.telemetryEngine != nil {
+		go h.telemetryEngine.OnDeviceDisconnect(conn.DeviceID)
+	}
 
 	// Emit disconnection event
 	if conn.authenticated {

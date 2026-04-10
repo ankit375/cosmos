@@ -15,6 +15,7 @@ type pooler interface {
 	Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
 	Begin(ctx context.Context) (pgx.Tx, error)
+	CopyFrom(ctx context.Context, tableName pgx.Identifier, columnNames []string, rowSrc pgx.CopyFromSource) (int64, error)
 }
 
 // Ensure pgxpool.Pool satisfies the pooler interface.

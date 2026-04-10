@@ -292,19 +292,41 @@ func (h *Hub) handleEvent(conn *DeviceConnection, msg *protocol.Message) {
 }
 
 // handleMetricsReport processes a metrics report from a device.
+// handleMetricsReport processes a metrics report from a device.
 func (h *Hub) handleMetricsReport(conn *DeviceConnection, msg *protocol.Message) {
+	var payload protocol.MetricsReportPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		conn.logger.Warn("invalid metrics report payload",
+			zap.String("device_id", conn.DeviceID.String()),
+			zap.Error(err),
+		)
+		wsMessageErrors.WithLabelValues("MetricsReport", "decode_error").Inc()
+		return
+	}
+
+	// Update last metrics timestamp in state
 	h.stateStore.Update(conn.DeviceID, func(state *DeviceState) {
 		state.LastMetrics = time.Now()
 	})
 
-	conn.logger.Debug("metrics report received",
+	// Delegate to telemetry engine
+	h.mu.RLock()
+	te := h.telemetryEngine
+	h.mu.RUnlock()
+
+	if te != nil {
+		te.Ingest(conn.DeviceID, conn.TenantID, conn.SiteID, &payload)
+	}
+
+	conn.logger.Debug("metrics report processed",
 		zap.String("device_id", conn.DeviceID.String()),
+		zap.Int("radios", len(payload.Radios)),
+		zap.Int("clients", len(payload.Clients)),
 		zap.Int("payload_size", len(msg.Payload)),
 	)
-
-	// TODO: Phase 7+ — parse full metrics, buffer, and batch flush to TimescaleDB
 }
 
+// handleClientEvent processes a client connect/disconnect event.
 // handleClientEvent processes a client connect/disconnect event.
 func (h *Hub) handleClientEvent(conn *DeviceConnection, msg *protocol.Message) {
 	var payload protocol.ClientEventPayload
@@ -320,8 +342,16 @@ func (h *Hub) handleClientEvent(conn *DeviceConnection, msg *protocol.Message) {
 		zap.String("ssid", payload.SSID),
 	)
 
-	// TODO: Phase 7+ — update client session tracking
+	// Delegate to telemetry engine
+	h.mu.RLock()
+	te := h.telemetryEngine
+	h.mu.RUnlock()
+
+	if te != nil {
+		te.HandleClientEvent(conn.DeviceID, conn.TenantID, conn.SiteID, &payload)
+	}
 }
+
 
 // handleFirmwareProgress processes a firmware upgrade progress report.
 func (h *Hub) handleFirmwareProgress(conn *DeviceConnection, msg *protocol.Message) {

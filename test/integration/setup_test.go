@@ -18,6 +18,7 @@ import (
 	"github.com/yourorg/cloudctrl/internal/config"
 	"github.com/yourorg/cloudctrl/internal/configmgr"
 	"github.com/yourorg/cloudctrl/internal/model"
+	"github.com/yourorg/cloudctrl/internal/telemetry"
 	pgstore "github.com/yourorg/cloudctrl/internal/store/postgres"
 	redisstore "github.com/yourorg/cloudctrl/internal/store/redis"
 	ws "github.com/yourorg/cloudctrl/internal/websocket"
@@ -191,6 +192,16 @@ func buildTestRouter(
 	hub.SetCommandManager(cmdMgr)
 	commandHandler := handler.NewCommandHandler(pg, cmdMgr, log)
 
+	// Telemetry engine for tests (Phase 7)
+	teCfg := telemetry.EngineConfig{
+		FlushInterval:         1 * time.Hour, // Don't auto-flush in tests
+		BufferCapacity:        1000,
+		SessionUpdateInterval: 1 * time.Hour,
+		ClientSnapshotTTL:     5 * time.Minute,
+	}
+	testTelemetryEngine := telemetry.NewEngine(teCfg, pg, rds, log.Named("telemetry"))
+	metricsHandler := handler.NewMetricsHandler(pg, testTelemetryEngine, log)
+
 	// Public
 	router.GET("/health", healthHandler.Health)
 
@@ -254,6 +265,10 @@ func buildTestRouter(
 				sites.GET("/:id/config/history", middleware.RequireViewer(), configHandler.GetSiteConfigHistory)
 				sites.POST("/:id/config/rollback", middleware.RequireOperator(), configHandler.RollbackSiteConfig)
 				sites.POST("/:id/config/validate", middleware.RequireOperator(), configHandler.ValidateSiteConfig)
+
+								// Site Metrics (Phase 7)
+				sites.GET("/:id/metrics", middleware.RequireViewer(), metricsHandler.GetSiteMetrics)
+				sites.GET("/:id/clients", middleware.RequireViewer(), metricsHandler.GetSiteClients)
 			}
 
 			// Devices
@@ -284,6 +299,11 @@ func buildTestRouter(
 				devices.POST("/:id/kick-client", middleware.RequireOperator(), commandHandler.KickClient)
 				devices.POST("/:id/scan", middleware.RequireOperator(), commandHandler.Scan)
 				devices.GET("/:id/commands", middleware.RequireViewer(), commandHandler.ListCommands)
+				// Device Metrics (Phase 7)
+				devices.GET("/:id/metrics", middleware.RequireViewer(), metricsHandler.GetDeviceMetrics)
+				devices.GET("/:id/metrics/radio", middleware.RequireViewer(), metricsHandler.GetDeviceRadioMetrics)
+				devices.GET("/:id/clients", middleware.RequireViewer(), metricsHandler.GetDeviceClients)
+				devices.GET("/:id/clients/history", middleware.RequireViewer(), metricsHandler.GetDeviceClientHistory)
 			}
 
 			// Audit
@@ -488,6 +508,12 @@ func loginUser(t *testing.T, email, password string) *model.LoginResponse {
 func cleanupTenant(t *testing.T, tenantID uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()
+
+
+	// Clean up metrics data (Phase 7)
+	_, _ = testPG.Pool.Exec(ctx, "DELETE FROM device_metrics WHERE tenant_id = $1", tenantID)
+	_, _ = testPG.Pool.Exec(ctx, "DELETE FROM radio_metrics WHERE tenant_id = $1", tenantID)
+	_, _ = testPG.Pool.Exec(ctx, "DELETE FROM client_sessions WHERE tenant_id = $1", tenantID)
 
 	// Delete command queue (FK to devices)
 	_, _ = testPG.Pool.Exec(ctx, "DELETE FROM command_queue WHERE tenant_id = $1", tenantID)

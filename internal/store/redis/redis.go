@@ -165,3 +165,62 @@ func hashToken(token string) string {
 	h.Write([]byte(token))
 	return hex.EncodeToString(h.Sum(nil))
 }
+// ── Client Snapshots (Phase 7 Telemetry) ─────────────────────
+
+const clientSnapshotPrefix = "device:clients:"
+
+// SetClientSnapshot stores the latest client list for a device.
+// The data is a JSON-encoded []ClientInfo.
+func (s *Store) SetClientSnapshot(ctx context.Context, deviceID string, data []byte, ttl time.Duration) error {
+	key := clientSnapshotPrefix + deviceID
+	if err := s.Client.Set(ctx, key, data, ttl).Err(); err != nil {
+		return fmt.Errorf("set client snapshot: %w", err)
+	}
+	return nil
+}
+
+// GetClientSnapshot retrieves the latest client list for a device.
+func (s *Store) GetClientSnapshot(ctx context.Context, deviceID string) ([]byte, error) {
+	key := clientSnapshotPrefix + deviceID
+	result, err := s.Client.Get(ctx, key).Bytes()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get client snapshot: %w", err)
+	}
+	return result, nil
+}
+
+// DeleteClientSnapshot removes a device's client snapshot.
+func (s *Store) DeleteClientSnapshot(ctx context.Context, deviceID string) error {
+	key := clientSnapshotPrefix + deviceID
+	if err := s.Client.Del(ctx, key).Err(); err != nil {
+		return fmt.Errorf("delete client snapshot: %w", err)
+	}
+	return nil
+}
+
+// GetSiteClients retrieves all client snapshots for devices in a site.
+// deviceIDs should be the list of device IDs in the site.
+func (s *Store) GetSiteClients(ctx context.Context, deviceIDs []string) (map[string][]byte, error) {
+	if len(deviceIDs) == 0 {
+		return nil, nil
+	}
+
+	pipe := s.Client.Pipeline()
+	cmds := make(map[string]*redis.StringCmd, len(deviceIDs))
+	for _, id := range deviceIDs {
+		cmds[id] = pipe.Get(ctx, clientSnapshotPrefix+id)
+	}
+	_, _ = pipe.Exec(ctx) // Ignore pipeline exec error, check individual cmds
+
+	results := make(map[string][]byte, len(deviceIDs))
+	for id, cmd := range cmds {
+		data, err := cmd.Bytes()
+		if err == nil {
+			results[id] = data
+		}
+	}
+	return results, nil
+}

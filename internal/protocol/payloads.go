@@ -129,3 +129,69 @@ type ErrorPayload struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 }
+
+// ============================================================
+// Telemetry payloads (Phase 7)
+// ============================================================
+
+// MetricsReportPayload is the full metrics report sent by the AP every 60s.
+// Wire type: 0x0010 MetricsReport (Device → Controller)
+type MetricsReportPayload struct {
+	Timestamp  int64                       `json:"timestamp"`
+	System     MetricsSystemPayload        `json:"system"`
+	Radios     []MetricsRadioPayload       `json:"radios"`
+	Clients    []MetricsClientPayload      `json:"clients"`
+	Interfaces []MetricsInterfacePayload   `json:"interfaces,omitempty"`
+}
+
+type MetricsSystemPayload struct {
+	CPUUsage    float64 `json:"cpu_usage"`
+	MemoryUsed  uint64  `json:"memory_used"`
+	MemoryTotal uint64  `json:"memory_total"`
+	LoadAvg1    float64 `json:"load_avg_1"`
+	LoadAvg5    float64 `json:"load_avg_5"`
+	LoadAvg15   float64 `json:"load_avg_15"`
+	Uptime      int64   `json:"uptime"`
+	Temperature float64 `json:"temperature,omitempty"`
+}
+
+type MetricsRadioPayload struct {
+	Band         string  `json:"band"`
+	Channel      int     `json:"channel"`
+	ChannelWidth int     `json:"channel_width"`
+	TxPower      int     `json:"tx_power"`
+	NoiseFloor   int     `json:"noise_floor"`
+	Utilization  float64 `json:"utilization"`
+	ClientCount  int     `json:"client_count"`
+	TxBytes      uint64  `json:"tx_bytes"`
+	RxBytes      uint64  `json:"rx_bytes"`
+	TxPackets    uint64  `json:"tx_packets"`
+	RxPackets    uint64  `json:"rx_packets"`
+	TxErrors     uint64  `json:"tx_errors"`
+	RxErrors     uint64  `json:"rx_errors"`
+	TxRetries    uint64  `json:"tx_retries"`
+}
+
+type MetricsClientPayload struct {
+	MAC            string `json:"mac"`
+	IP             string `json:"ip,omitempty"`
+	Hostname       string `json:"hostname,omitempty"`
+	SSID           string `json:"ssid"`
+	Band           string `json:"band"`
+	RSSI           int    `json:"rssi"`
+	SNR            int    `json:"snr,omitempty"`
+	TxRate         int    `json:"tx_rate"`
+	RxRate         int    `json:"rx_rate"`
+	TxBytes        uint64 `json:"tx_bytes"`
+	RxBytes        uint64 `json:"rx_bytes"`
+	ConnectedSince int64  `json:"connected_since"`
+}
+
+type MetricsInterfacePayload struct {
+	Name       string `json:"name"`
+	TxBytes    uint64 `json:"tx_bytes"`
+	RxBytes    uint64 `json:"rx_bytes"`
+	Speed      int    `json:"speed"`
+	FullDuplex bool   `json:"full_duplex"`
+	Up         bool   `json:"up"`
+}
