@@ -14,7 +14,9 @@ import (
 	"github.com/yourorg/cloudctrl/internal/api/handler"
 	"github.com/yourorg/cloudctrl/internal/api/middleware"
 	"github.com/yourorg/cloudctrl/internal/auth"
+	"github.com/yourorg/cloudctrl/internal/command"
 	"github.com/yourorg/cloudctrl/internal/config"
+	"github.com/yourorg/cloudctrl/internal/configmgr"
 	"github.com/yourorg/cloudctrl/internal/model"
 	pgstore "github.com/yourorg/cloudctrl/internal/store/postgres"
 	redisstore "github.com/yourorg/cloudctrl/internal/store/redis"
@@ -22,18 +24,17 @@ import (
 	"github.com/yourorg/cloudctrl/pkg/logger"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
-	"github.com/yourorg/cloudctrl/internal/configmgr"
 )
 
 var (
-	testPG     *pgstore.Store
-	testRedis  *redisstore.Store
-	testJWT    *auth.JWTService
-	testLogger *zap.Logger
-	testRouter *gin.Engine
-	testCfg    *config.Config
-	testHub    *ws.Hub // NEW
-	testConfigMgr *configmgr.Manager  // ← ADD
+	testPG         *pgstore.Store
+	testRedis      *redisstore.Store
+	testJWT        *auth.JWTService
+	testLogger     *zap.Logger
+	testRouter     *gin.Engine
+	testCfg        *config.Config
+	testHub        *ws.Hub
+	testConfigMgr  *configmgr.Manager
 )
 
 // TestMain sets up and tears down the integration test environment.
@@ -70,19 +71,19 @@ func TestMain(m *testing.M) {
 	// JWT service
 	testJWT = auth.NewJWTService(cfg.Auth)
 
-	// WebSocket Hub (NEW)
+	// WebSocket Hub
 	testHub = ws.NewHub(cfg.WebSocket, pg, log.Named("websocket"))
 
-	// Config Manager (NEW)
+	// Config Manager
 	cmCfg := configmgr.ManagerConfig{
-		SafeApplyTimeout:  10 * time.Second,  // Shorter for tests
-		StabilityDelay:    1 * time.Second,   // Shorter for tests
-		ReconcileInterval: 60 * time.Second,  // Don't auto-reconcile in tests
+		SafeApplyTimeout:  10 * time.Second,
+		StabilityDelay:    1 * time.Second,
+		ReconcileInterval: 60 * time.Second,
 	}
 	testConfigMgr = configmgr.NewManager(pg, testHub, cmCfg, log.Named("configmgr"))
 	testHub.SetConfigManager(testConfigMgr)
 
-	// Build test router (now includes device routes)
+	// Build test router (includes all routes)
 	testRouter = buildTestRouter(pg, rds, testJWT, testHub, testConfigMgr, log)
 
 	// Run tests
@@ -160,7 +161,7 @@ func buildTestRouter(
 	rds *redisstore.Store,
 	jwtSvc *auth.JWTService,
 	hub *ws.Hub,
-	cm *configmgr.Manager,  // ← ADD PARAMETER
+	cm *configmgr.Manager,
 	log *zap.Logger,
 ) *gin.Engine {
 	gin.SetMode(gin.TestMode)
@@ -175,8 +176,20 @@ func buildTestRouter(
 	tenantHandler := handler.NewTenantHandler(pg, rds, log)
 	siteHandler := handler.NewSiteHandler(pg, rds, log)
 	auditHandler := handler.NewAuditHandler(pg, log)
-	deviceHandler := handler.NewDeviceHandler(pg, hub, log) // NEW
-	configHandler := handler.NewConfigHandler(pg, cm, log)  // ← ADD
+	deviceHandler := handler.NewDeviceHandler(pg, hub, log)
+	configHandler := handler.NewConfigHandler(pg, cm, log)
+
+	// Command manager + handler for tests
+	cmdCfg := command.ManagerConfig{
+		CommandTimeout:       5 * time.Second,
+		TimeoutCheckInterval: 1 * time.Second,
+		DefaultMaxRetries:    3,
+		DefaultPriority:      5,
+		DefaultTTL:           5 * time.Minute,
+	}
+	cmdMgr := command.NewManager(pg, hub, cmdCfg, log.Named("commandmgr"))
+	hub.SetCommandManager(cmdMgr)
+	commandHandler := handler.NewCommandHandler(pg, cmdMgr, log)
 
 	// Public
 	router.GET("/health", healthHandler.Health)
@@ -235,7 +248,7 @@ func buildTestRouter(
 				sites.DELETE("/:id", middleware.RequireAdmin(), siteHandler.Delete)
 				sites.GET("/:id/stats", middleware.RequireViewer(), siteHandler.Stats)
 
-				// Site Config (NEW)
+				// Site Config
 				sites.GET("/:id/config", middleware.RequireViewer(), configHandler.GetSiteConfig)
 				sites.PUT("/:id/config", middleware.RequireOperator(), configHandler.UpdateSiteConfig)
 				sites.GET("/:id/config/history", middleware.RequireViewer(), configHandler.GetSiteConfigHistory)
@@ -243,7 +256,7 @@ func buildTestRouter(
 				sites.POST("/:id/config/validate", middleware.RequireOperator(), configHandler.ValidateSiteConfig)
 			}
 
-			// Devices (NEW)
+			// Devices
 			devices := authenticated.Group("/devices")
 			{
 				devices.GET("", middleware.RequireViewer(), deviceHandler.List)
@@ -255,6 +268,8 @@ func buildTestRouter(
 				devices.POST("/:id/adopt", middleware.RequireOperator(), deviceHandler.Adopt)
 				devices.POST("/:id/move", middleware.RequireOperator(), deviceHandler.Move)
 				devices.GET("/:id/status", middleware.RequireViewer(), deviceHandler.LiveStatus)
+
+				// Device Config
 				devices.GET("/:id/config", middleware.RequireViewer(), configHandler.GetDeviceConfig)
 				devices.GET("/:id/config/overrides", middleware.RequireViewer(), configHandler.GetDeviceOverrides)
 				devices.PUT("/:id/config/overrides", middleware.RequireOperator(), configHandler.UpdateDeviceOverrides)
@@ -262,6 +277,13 @@ func buildTestRouter(
 				devices.GET("/:id/config/history", middleware.RequireViewer(), configHandler.GetDeviceConfigHistory)
 				devices.POST("/:id/config/rollback", middleware.RequireOperator(), configHandler.RollbackDeviceConfig)
 				devices.POST("/:id/config/push", middleware.RequireOperator(), configHandler.ForcePushDeviceConfig)
+
+				// Device Commands (Phase 6)
+				devices.POST("/:id/reboot", middleware.RequireOperator(), commandHandler.Reboot)
+				devices.POST("/:id/locate", middleware.RequireOperator(), commandHandler.Locate)
+				devices.POST("/:id/kick-client", middleware.RequireOperator(), commandHandler.KickClient)
+				devices.POST("/:id/scan", middleware.RequireOperator(), commandHandler.Scan)
+				devices.GET("/:id/commands", middleware.RequireViewer(), commandHandler.ListCommands)
 			}
 
 			// Audit
@@ -384,7 +406,7 @@ func seedSite(t *testing.T, tenantID uuid.UUID, name string) *model.Site {
 	return site
 }
 
-// seedSiteWithAutoAdopt creates a test site with auto_adopt enabled. (NEW)
+// seedSiteWithAutoAdopt creates a test site with auto_adopt enabled.
 func seedSiteWithAutoAdopt(t *testing.T, tenantID uuid.UUID, name string) *model.Site {
 	t.Helper()
 	ctx := context.Background()
@@ -408,7 +430,7 @@ func seedSiteWithAutoAdopt(t *testing.T, tenantID uuid.UUID, name string) *model
 	return site
 }
 
-// seedPendingDevice creates a pending_adopt device in the database. (NEW)
+// seedPendingDevice creates a pending_adopt device in the database.
 func seedPendingDevice(t *testing.T, tenantID uuid.UUID) *model.Device {
 	t.Helper()
 	ctx := context.Background()
@@ -417,12 +439,12 @@ func seedPendingDevice(t *testing.T, tenantID uuid.UUID) *model.Device {
 	mac := fmt.Sprintf("AA:BB:CC:%02X:%02X:%02X", deviceID[0], deviceID[1], deviceID[2])
 
 	_, err := testPG.Pool.Exec(ctx, `
-    	INSERT INTO devices (id, tenant_id, mac, serial, name, model, status, firmware_version, capabilities, system_info)
-    	VALUES ($1, $2, $3, $4, $5, $6, 'pending_adopt', '1.0.0', '{}', '{}')`,
-    	deviceID, tenantID, mac,
-    	"SN-"+deviceID.String()[:8],
-    	"AP-"+mac[len(mac)-5:],
-    	"AP-2400-AC",
+		INSERT INTO devices (id, tenant_id, mac, serial, name, model, status, firmware_version, capabilities, system_info)
+		VALUES ($1, $2, $3, $4, $5, $6, 'pending_adopt', '1.0.0', '{}', '{}')`,
+		deviceID, tenantID, mac,
+		"SN-"+deviceID.String()[:8],
+		"AP-"+mac[len(mac)-5:],
+		"AP-2400-AC",
 	)
 	if err != nil {
 		t.Fatalf("failed to seed pending device: %v", err)
@@ -462,12 +484,15 @@ func loginUser(t *testing.T, email, password string) *model.LoginResponse {
 	return &resp.Data
 }
 
-// cleanupTenant removes all data for a tenant. (UPDATED — now cleans devices too)
+// cleanupTenant removes all data for a tenant.
 func cleanupTenant(t *testing.T, tenantID uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()
 
-		// Delete device configs first (FK to devices)
+	// Delete command queue (FK to devices)
+	_, _ = testPG.Pool.Exec(ctx, "DELETE FROM command_queue WHERE tenant_id = $1", tenantID)
+
+	// Delete device configs (FK to devices)
 	_, _ = testPG.Pool.Exec(ctx, "DELETE FROM device_configs WHERE tenant_id = $1", tenantID)
 
 	// Delete device overrides (FK to devices)
@@ -476,8 +501,7 @@ func cleanupTenant(t *testing.T, tenantID uuid.UUID) {
 	// Delete config templates (FK to sites)
 	_, _ = testPG.Pool.Exec(ctx, "DELETE FROM config_templates WHERE tenant_id = $1", tenantID)
 
-	// Delete devices first (FK constraint)
-	// ✅ Fixed
+	// Delete devices (FK constraint)
 	_, _ = testPG.Pool.Exec(ctx, "DELETE FROM devices WHERE tenant_id = $1", tenantID)
 
 	// Delete sites

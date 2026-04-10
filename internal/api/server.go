@@ -12,12 +12,13 @@ import (
 	"github.com/yourorg/cloudctrl/internal/api/handler"
 	"github.com/yourorg/cloudctrl/internal/api/middleware"
 	"github.com/yourorg/cloudctrl/internal/auth"
+	"github.com/yourorg/cloudctrl/internal/command"
 	"github.com/yourorg/cloudctrl/internal/config"
+	"github.com/yourorg/cloudctrl/internal/configmgr"
 	pgstore "github.com/yourorg/cloudctrl/internal/store/postgres"
 	redisstore "github.com/yourorg/cloudctrl/internal/store/redis"
 	ws "github.com/yourorg/cloudctrl/internal/websocket"
 	"go.uber.org/zap"
-	"github.com/yourorg/cloudctrl/internal/configmgr"
 )
 
 // App is the main application container.
@@ -30,7 +31,8 @@ type App struct {
 	redisStore *redisstore.Store
 	jwtService *auth.JWTService
 	hub        *ws.Hub
-	configMgr    *configmgr.Manager  // ← ADD THIS
+	configMgr  *configmgr.Manager
+	commandMgr *command.Manager
 }
 
 // NewApp creates and wires up the entire application.
@@ -97,6 +99,13 @@ func NewApp(ctx context.Context, cfg *config.Config, logger *zap.Logger) (*App, 
 	// Wire config manager into hub
 	app.hub.SetConfigManager(app.configMgr)
 
+	// Initialize Command Manager
+	cmdCfg := command.DefaultManagerConfig()
+	app.commandMgr = command.NewManager(pg, app.hub, cmdCfg, logger.Named("commandmgr"))
+
+	// Wire command manager into hub
+	app.hub.SetCommandManager(app.commandMgr)
+
 	if cfg.TLS.Enabled {
 		tlsConfig := &tls.Config{
 			MinVersion: tls.VersionTLS12,
@@ -137,7 +146,8 @@ func (a *App) buildRouter() *gin.Engine {
 	siteHandler := handler.NewSiteHandler(a.pgStore, a.redisStore, a.logger)
 	auditHandler := handler.NewAuditHandler(a.pgStore, a.logger)
 	deviceHandler := handler.NewDeviceHandler(a.pgStore, a.hub, a.logger)
-	configHandler := handler.NewConfigHandler(a.pgStore, a.configMgr, a.logger)  // ← ADD
+	configHandler := handler.NewConfigHandler(a.pgStore, a.configMgr, a.logger)
+	commandHandler := handler.NewCommandHandler(a.pgStore, a.commandMgr, a.logger)
 
 	// ── Public endpoints (no auth) ───────────────────────────
 	router.GET("/health", healthHandler.Health)
@@ -208,7 +218,7 @@ func (a *App) buildRouter() *gin.Engine {
 				sites.DELETE("/:id", middleware.RequireAdmin(), siteHandler.Delete)
 				sites.GET("/:id/stats", middleware.RequireViewer(), siteHandler.Stats)
 
-				// Site Config (NEW)
+				// Site Config
 				sites.GET("/:id/config", middleware.RequireViewer(), configHandler.GetSiteConfig)
 				sites.PUT("/:id/config", middleware.RequireOperator(), configHandler.UpdateSiteConfig)
 				sites.GET("/:id/config/history", middleware.RequireViewer(), configHandler.GetSiteConfigHistory)
@@ -229,7 +239,7 @@ func (a *App) buildRouter() *gin.Engine {
 				devices.POST("/:id/move", middleware.RequireOperator(), deviceHandler.Move)
 				devices.GET("/:id/status", middleware.RequireViewer(), deviceHandler.LiveStatus)
 
-				// Device Config (NEW)
+				// Device Config
 				devices.GET("/:id/config", middleware.RequireViewer(), configHandler.GetDeviceConfig)
 				devices.GET("/:id/config/overrides", middleware.RequireViewer(), configHandler.GetDeviceOverrides)
 				devices.PUT("/:id/config/overrides", middleware.RequireOperator(), configHandler.UpdateDeviceOverrides)
@@ -237,6 +247,13 @@ func (a *App) buildRouter() *gin.Engine {
 				devices.GET("/:id/config/history", middleware.RequireViewer(), configHandler.GetDeviceConfigHistory)
 				devices.POST("/:id/config/rollback", middleware.RequireOperator(), configHandler.RollbackDeviceConfig)
 				devices.POST("/:id/config/push", middleware.RequireOperator(), configHandler.ForcePushDeviceConfig)
+
+				// Device Commands (Phase 6)
+				devices.POST("/:id/reboot", middleware.RequireOperator(), commandHandler.Reboot)
+				devices.POST("/:id/locate", middleware.RequireOperator(), commandHandler.Locate)
+				devices.POST("/:id/kick-client", middleware.RequireOperator(), commandHandler.KickClient)
+				devices.POST("/:id/scan", middleware.RequireOperator(), commandHandler.Scan)
+				devices.GET("/:id/commands", middleware.RequireViewer(), commandHandler.ListCommands)
 			}
 
 			// Audit
@@ -266,8 +283,16 @@ func (a *App) Start() error {
 	// Start the hub
 	a.hub.Run()
 
-	// Start the config manager     ← ADD
+	// Start the config manager
 	a.configMgr.Start()
+
+	// Recover command queues from DB
+	if err := a.commandMgr.RecoverOnStartup(context.Background()); err != nil {
+		a.logger.Warn("failed to recover command queues (non-fatal)", zap.Error(err))
+	}
+
+	// Start the command manager
+	a.commandMgr.Start()
 
 	go func() {
 		a.logger.Info("starting HTTP API server", zap.String("addr", a.cfg.Server.HTTPAddr))
@@ -314,7 +339,10 @@ func (a *App) Stop(ctx context.Context) error {
 		a.logger.Error("WebSocket server shutdown error", zap.Error(err))
 	}
 
-	// Stop config manager          ← ADD
+	// Stop command manager
+	a.commandMgr.Stop()
+
+	// Stop config manager
 	a.configMgr.Stop()
 
 	// Drain WebSocket connections and stop hub

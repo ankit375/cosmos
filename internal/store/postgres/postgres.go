@@ -23,6 +23,7 @@ type Store struct {
 	Events  *EventStore
 	Audit   *AuditStore
 	Configs *ConfigStore  // ← ADD THIS
+	Commands *CommandStore // ← ADD THIS
 }
 
 // New creates a new PostgreSQL store with a configured connection pool.
@@ -75,6 +76,7 @@ func New(ctx context.Context, cfg config.DatabaseConfig, logger *zap.Logger) (*S
 	s.Events = NewEventStore(pool)
 	s.Audit = NewAuditStore(pool)
 	s.Configs = NewConfigStore(pool)
+	s.Commands = NewCommandStore(pool)
 
 	return s, nil
 }

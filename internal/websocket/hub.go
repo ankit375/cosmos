@@ -2,17 +2,18 @@ package websocket
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 
 	"github.com/google/uuid"
 	"github.com/yourorg/cloudctrl/internal/config"
+	"github.com/yourorg/cloudctrl/internal/configmgr"
 	"github.com/yourorg/cloudctrl/internal/device"
 	"github.com/yourorg/cloudctrl/internal/model"
 	"github.com/yourorg/cloudctrl/internal/protocol"
 	pgstore "github.com/yourorg/cloudctrl/internal/store/postgres"
 	"go.uber.org/zap"
-	"github.com/yourorg/cloudctrl/internal/configmgr"
 )
 
 // Hub manages all device WebSocket connections.
@@ -47,7 +48,15 @@ type Hub struct {
 	// Message handlers
 	handlers map[uint16]MessageHandler
 
-	configManager *configmgr.Manager  
+	// Config manager
+	configManager *configmgr.Manager
+
+	// Command manager (interface to avoid circular imports)
+	commandManager interface {
+		HandleCommandResponse(deviceID uuid.UUID, msgID uint32, success bool, result json.RawMessage, errMsg string)
+		DeliverQueuedCommands(deviceID uuid.UUID)
+		GetPendingCount(deviceID uuid.UUID) int
+	}
 
 	// Lifecycle
 	ctx    context.Context
@@ -99,6 +108,17 @@ func (h *Hub) registerHandlers() {
 	h.handlers[protocol.MsgClientEvent] = h.handleClientEvent
 	h.handlers[protocol.MsgFirmwareProgress] = h.handleFirmwareProgress
 	h.handlers[protocol.MsgPing] = h.handlePing
+}
+
+// SetCommandManager wires the command manager into the hub.
+func (h *Hub) SetCommandManager(cm interface {
+	HandleCommandResponse(deviceID uuid.UUID, msgID uint32, success bool, result json.RawMessage, errMsg string)
+	DeliverQueuedCommands(deviceID uuid.UUID)
+	GetPendingCount(deviceID uuid.UUID) int
+}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.commandManager = cm
 }
 
 // Run starts the hub's main loop and background workers.

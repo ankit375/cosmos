@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/yourorg/cloudctrl/internal/model"
 	"github.com/yourorg/cloudctrl/internal/protocol"
 	"go.uber.org/zap"
+	"github.com/google/uuid"
 )
 
 // handleMessage dispatches a message to the appropriate handler.
@@ -79,13 +79,22 @@ func (h *Hub) handleHeartbeat(conn *DeviceConnection, msg *protocol.Message) {
 			}
 		}
 
-		// >>> NEW: Push pending config on reconnect <<<
+		// Push pending config on reconnect
 		h.mu.RLock()
 		cm := h.configManager
 		h.mu.RUnlock()
 
 		if cm != nil {
 			go cm.PushPendingConfigOnReconnect(conn.TenantID, conn.DeviceID)
+		}
+
+		// Deliver queued commands on reconnect
+		h.mu.RLock()
+		cmdMgr := h.commandManager
+		h.mu.RUnlock()
+
+		if cmdMgr != nil {
+			go cmdMgr.DeliverQueuedCommands(conn.DeviceID)
 		}
 	}
 
@@ -116,23 +125,31 @@ func (h *Hub) handleHeartbeat(conn *DeviceConnection, msg *protocol.Message) {
 		zap.Int("clients", payload.ClientCount),
 		zap.Float64("cpu", payload.CPUUsage),
 		zap.String("prev_status", string(previousStatus)),
+		zap.Int("pending_commands", pendingCommands),
 	)
 }
 
 // getPendingCommandCount returns the number of pending commands for a device.
-// Queries the database command_queue table.
+// Uses the command manager if available, falls back to direct DB query.
 func (h *Hub) getPendingCommandCount(deviceID uuid.UUID) int {
+	h.mu.RLock()
+	cm := h.commandManager
+	h.mu.RUnlock()
+
+	if cm != nil {
+		return cm.GetPendingCount(deviceID)
+	}
+
+	// Fallback: query DB directly
 	ctx, cancel := context.WithTimeout(h.ctx, 2*time.Second)
 	defer cancel()
 
 	var count int
 	err := h.pgStore.Pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM command_queue
-		 WHERE device_id = \$1 AND status = 'queued'`,
+		`SELECT COUNT(*) FROM command_queue WHERE device_id = \$1 AND status = 'queued'`,
 		deviceID,
 	).Scan(&count)
 	if err != nil {
-		// Non-fatal — return 0 if we can't query
 		return 0
 	}
 	return count
@@ -161,7 +178,6 @@ func (h *Hub) handleConfigAck(conn *DeviceConnection, msg *protocol.Message) {
 			zap.Int64("version", payload.Version),
 			zap.String("error", payload.Error),
 		)
-		// Emit config failure event (NEW)
 		go h.eventEmitter.StateTransition(h.ctx, conn.TenantID, conn.DeviceID,
 			model.DeviceStatusOnline, model.DeviceStatusError)
 	}
@@ -188,31 +204,53 @@ func (h *Hub) handleCommandResponse(conn *DeviceConnection, msg *protocol.Messag
 		zap.Bool("success", payload.Success),
 	)
 
-	// Update command status in DB (NEW)
-	go h.updateCommandStatus(conn.DeviceID, msg.Header.MessageID, payload.Success, payload.Error)
+	// Delegate to command manager for proper ACK/completion tracking
+	h.mu.RLock()
+	cm := h.commandManager
+	h.mu.RUnlock()
+
+	if cm != nil {
+		go cm.HandleCommandResponse(
+			conn.DeviceID,
+			msg.Header.MessageID,
+			payload.Success,
+			payload.Result,
+			payload.Error,
+		)
+		return
+	}
+
+	// Fallback: update DB directly if no command manager wired
+	go h.updateCommandStatusFallback(conn.DeviceID, msg.Header.MessageID, payload.Success, payload.Error)
 }
 
-// updateCommandStatus marks a command as completed or failed in the database.
-func (h *Hub) updateCommandStatus(deviceID uuid.UUID, msgID uint32, success bool, errMsg string) {
+// updateCommandStatusFallback is the legacy direct-DB fallback used only when
+// no command manager is wired. Prefer the command manager path.
+func (h *Hub) updateCommandStatusFallback(deviceID uuid.UUID, msgID uint32, success bool, errMsg string) {
 	ctx, cancel := context.WithTimeout(h.ctx, 3*time.Second)
 	defer cancel()
 
-	status := "completed"
+	status := model.CommandStatusCompleted
 	if !success {
-		status = "failed"
+		status = model.CommandStatusFailed
 	}
 
+	// PostgreSQL doesn't support ORDER BY + LIMIT in UPDATE directly.
+	// Use a subquery to find the oldest sent command for this device.
 	_, err := h.pgStore.Pool.Exec(ctx,
 		`UPDATE command_queue SET
 			status = \$1,
 			error_message = \$2,
 			completed_at = NOW()
-		WHERE device_id = \$3 AND status = 'sent'
-		ORDER BY created_at ASC
-		LIMIT 1`,
+		WHERE id = (
+			SELECT id FROM command_queue
+			WHERE device_id = \$3 AND status = 'sent'
+			ORDER BY created_at ASC
+			LIMIT 1
+		)`,
 		status, errMsg, deviceID)
 	if err != nil {
-		h.logger.Error("failed to update command status",
+		h.logger.Error("failed to update command status (fallback)",
 			zap.String("device_id", deviceID.String()),
 			zap.Error(err),
 		)
@@ -234,7 +272,6 @@ func (h *Hub) handleEvent(conn *DeviceConnection, msg *protocol.Message) {
 		zap.String("message", payload.Message),
 	)
 
-	// Persist event to database (NEW)
 	severity := model.EventSeverity(payload.Severity)
 	if severity == "" {
 		severity = model.SeverityInfo
@@ -256,7 +293,6 @@ func (h *Hub) handleEvent(conn *DeviceConnection, msg *protocol.Message) {
 
 // handleMetricsReport processes a metrics report from a device.
 func (h *Hub) handleMetricsReport(conn *DeviceConnection, msg *protocol.Message) {
-	// Update last metrics time in state
 	h.stateStore.Update(conn.DeviceID, func(state *DeviceState) {
 		state.LastMetrics = time.Now()
 	})
@@ -266,7 +302,7 @@ func (h *Hub) handleMetricsReport(conn *DeviceConnection, msg *protocol.Message)
 		zap.Int("payload_size", len(msg.Payload)),
 	)
 
-	// TODO: Phase 5+ — parse full metrics, buffer, and batch flush to TimescaleDB
+	// TODO: Phase 7+ — parse full metrics, buffer, and batch flush to TimescaleDB
 }
 
 // handleClientEvent processes a client connect/disconnect event.
@@ -284,7 +320,7 @@ func (h *Hub) handleClientEvent(conn *DeviceConnection, msg *protocol.Message) {
 		zap.String("ssid", payload.SSID),
 	)
 
-	// TODO: Phase 5+ — update client session tracking
+	// TODO: Phase 7+ — update client session tracking
 }
 
 // handleFirmwareProgress processes a firmware upgrade progress report.
@@ -302,7 +338,7 @@ func (h *Hub) handleFirmwareProgress(conn *DeviceConnection, msg *protocol.Messa
 		zap.Int("progress", payload.Progress),
 	)
 
-	// TODO: Phase 5+ — update firmware_upgrade_tasks
+	// TODO: Phase 7+ — update firmware_upgrade_tasks
 }
 
 // handlePing responds to an application-level ping with a pong.
