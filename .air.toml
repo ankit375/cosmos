@@ -1,0 +1,31 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  bin = "./tmp/cloudctrl"
+  cmd = "go build -o ./tmp/cloudctrl ./cmd/controller/"
+  delay = 1000
+  exclude_dir = ["assets", "tmp", "vendor", "node_modules", "agent", "deployments", "certs"]
+  exclude_file = []
+  exclude_regex = ["_test.go"]
+  exclude_unchanged = false
+  follow_symlink = false
+  full_bin = "./tmp/cloudctrl --config configs/controller.dev.yaml"
+  include_dir = []
+  include_ext = ["go", "yaml"]
+  kill_delay = "2s"
+  log = "build-errors.log"
+  send_interrupt = true
+  stop_on_error = true
+
+[log]
+  time = false
+
+[color]
+  build = "yellow"
+  main = "magenta"
+  runner = "green"
+  watcher = "cyan"
+
+[misc]
+  clean_on_exit = true

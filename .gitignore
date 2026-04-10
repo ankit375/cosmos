@@ -1,0 +1,28 @@
+# Binaries
+bin/
+*.exe
+
+# Certs (sensitive)
+certs/*.pem
+certs/*.srl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
+*.test
+
+# Environment
+.env
+*.env
+
+# Generated/temp
+combined.txt
+cloud-controller.txt

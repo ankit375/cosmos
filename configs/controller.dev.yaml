@@ -1,0 +1,87 @@
+# Cloud Controller Development Configuration
+
+server:
+  http_addr: ":8080"
+  ws_addr: ":8443"
+  firmware_addr: ":8090"
+  read_timeout: 30s
+  write_timeout: 30s
+  max_devices: 1000
+  shutdown_grace: 10s
+
+database:
+  host: "localhost"
+  port: 5432
+  user: "cloudctrl"
+  password: "cloudctrl_dev_password"
+  dbname: "cloudcontroller"
+  sslmode: "disable"
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: 1h
+
+redis:
+  addr: "localhost:6379"
+  password: "cloudctrl_redis_password"
+  db: 0
+
+auth:
+  jwt_secret: "dev-jwt-secret-change-in-production-minimum-32-chars!!"
+  jwt_expiry: 24h
+  refresh_expiry: 720h
+  device_token_length: 64
+
+tls:
+  ca_cert: "certs/ca.pem"
+  server_cert: "certs/server.pem"
+  server_key: "certs/server-key.pem"
+  enabled: true
+
+firmware:
+  storage_type: "minio"
+  minio_endpoint: "localhost:9000"
+  minio_access_key: "minioadmin"
+  minio_secret_key: "minioadmin_password"
+  minio_bucket: "firmware"
+  minio_use_ssl: false
+
+metrics:
+  retention_days: 90
+  flush_interval: 10s
+  batch_size: 1000
+
+monitoring:
+  heartbeat_timeout: 90s
+  check_interval: 30s
+  alert_webhook: ""
+
+log:
+  level: "debug"
+  format: "console"
+  output: "stdout"
+
+# Development-specific settings
+dev:
+  seed_admin_email: "admin@cloudctrl.local"
+  seed_admin_password: "admin123456"
+  auto_adopt: true
+  cors_allow_all: true
+
+# WebSocket configuration
+websocket:
+  max_connections: 1000
+  max_connections_per_ip: 5
+  connection_rate_limit: 50
+  write_wait: 10s
+  pong_wait: 30s
+  ping_interval: 15s
+  auth_timeout: 10s
+  read_buffer_size: 4096
+  write_buffer_size: 4096
+  send_channel_size: 64
+  control_rate_limit: 10
+  telemetry_rate_limit: 5
+  bulk_rate_limit: 2
+  state_persist_interval: 30s
+  offline_check_interval: 30s
+  heartbeat_timeout: 90s

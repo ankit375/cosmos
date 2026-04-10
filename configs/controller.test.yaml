@@ -1,0 +1,74 @@
+server:
+  http_addr: ":8080"
+  ws_addr: ":8443"
+  read_timeout: "30s"
+  write_timeout: "30s"
+  max_devices: 100
+  shutdown_grace: "5s"
+
+database:
+  host: "localhost"
+  port: 5433
+  user: "cloudctrl"
+  password: "cloudctrl"
+  dbname: "cloudctrl_test"
+  sslmode: "disable"
+  max_open_conns: 10
+  max_idle_conns: 2
+  conn_max_lifetime: "30m"
+
+redis:
+  addr: "localhost:6380"
+  password: ""
+  db: 1
+
+auth:
+  jwt_secret: "integration-test-secret-key-minimum-32-characters!!"
+  jwt_expiry: "15m"
+  refresh_expiry: "24h"
+  device_token_length: 64
+
+tls:
+  enabled: false
+
+firmware:
+  storage_type: "local"
+  local_path: "/tmp/cloudctrl-test-firmware"
+
+metrics:
+  retention_days: 7
+  flush_interval: "10s"
+  batch_size: 100
+
+monitoring:
+  heartbeat_timeout: "90s"
+  check_interval: "30s"
+
+log:
+  level: "debug"
+  format: "console"
+  output: "stdout"
+
+dev:
+  seed_admin_email: "admin@test.local"
+  seed_admin_password: "testadmin123"
+  auto_adopt: false
+  cors_allow_all: true
+
+websocket:
+  max_connections: 100
+  max_connections_per_ip: 10
+  connection_rate_limit: 50
+  write_wait: 10s
+  pong_wait: 30s
+  ping_interval: 15s
+  auth_timeout: 5s
+  read_buffer_size: 4096
+  write_buffer_size: 4096
+  send_channel_size: 64
+  control_rate_limit: 10
+  telemetry_rate_limit: 5
+  bulk_rate_limit: 2
+  state_persist_interval: 2s
+  offline_check_interval: 2s
+  heartbeat_timeout: 5s

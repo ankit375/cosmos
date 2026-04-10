@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  test-postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: cloudctrl-test-postgres
+    environment:
+      POSTGRES_USER: cloudctrl
+      POSTGRES_PASSWORD: cloudctrl
+      POSTGRES_DB: cloudctrl_test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudctrl -d cloudctrl_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  test-redis:
+    image: redis:7-alpine
+    container_name: cloudctrl-test-redis
+    ports:
+      - "6380:6379"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 10

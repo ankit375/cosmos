@@ -1,0 +1,129 @@
+version: '3.8'
+
+services:
+  # ============================================================
+  # PostgreSQL with TimescaleDB
+  # ============================================================
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: cloudctrl-postgres
+    environment:
+      POSTGRES_DB: cloudcontroller
+      POSTGRES_USER: cloudctrl
+      POSTGRES_PASSWORD: cloudctrl_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudctrl -d cloudcontroller"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================================
+  # Redis
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: cloudctrl-redis
+    command: >
+      redis-server 
+      --requirepass cloudctrl_redis_password
+      --maxmemory 128mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "cloudctrl_redis_password", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================================
+  # MinIO (Object Storage for Firmware)
+  # ============================================================
+  minio:
+    image: minio/minio:latest
+    container_name: cloudctrl-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin_password
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ============================================================
+  # MinIO Setup (create bucket on first run)
+  # ============================================================
+  minio-setup:
+    image: minio/mc:latest
+    container_name: cloudctrl-minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin_password;
+      mc mb local/firmware --ignore-existing;
+      mc mb local/backups --ignore-existing;
+      mc anonymous set download local/firmware;
+      echo 'MinIO buckets created successfully';
+      exit 0;
+      "
+
+  # ============================================================
+  # Prometheus (Monitoring)
+  # ============================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: cloudctrl-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - promdata:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+    restart: unless-stopped
+
+  # ============================================================
+  # Grafana (Dashboards)
+  # ============================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: cloudctrl-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafanadata:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  promdata:
+  grafanadata:
